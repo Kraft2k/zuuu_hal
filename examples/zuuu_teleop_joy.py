@@ -80,6 +80,7 @@ class JoyTeleop(Node):
         pygame.joystick.init()
 
         self.nb_joy = pygame.joystick.get_count()
+        print(str(self.nb_joy))
         if self.nb_joy < 1:
             self.get_logger().error("No controller detected.")
             self.emergency_shutdown()

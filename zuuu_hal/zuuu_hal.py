@@ -59,6 +59,9 @@ from zuuu_hal.lidar_safety import LidarSafety
 
 import RPi.GPIO as GPIO
 
+REAR_RIGHT_LIGHT = 2
+REAR_LEFT_LIGHT = 3
+
 FRONT_RIGHT_LIGHT = 4
 FRONT_LEFT_LIGHT = 17
 
@@ -115,7 +118,8 @@ class MobileBase:
         self.back_wheel_measurements, self.left_wheel_measurements, self.right_wheel_measurements = None, None, None
         self.left_wheel_nones, self.left_wheel_nones, self.right_wheel_nones = 0, 0, 0
         self.wheel_radius = 0.2/2.0
-        self.wheel_to_center = 0.175
+        self.y_distance_wheels = 0.35 # The distance between the left and right wheels (in meters)
+        self.wheel_to_center = 0.35/2.0
         self.half_poles = 14.0
         self.back_wheel_rpm, self.left_wheel_rpm, self.right_wheel_rpm = 0, 0, 0
         self.back_wheel_avg_rpm, self.left_wheel_avg_rpm, self.right_wheel_avg_rpm = 0, 0, 0
@@ -124,15 +128,14 @@ class MobileBase:
         # These values might be a tad too safe, however the battery should be almost empty when the cells are
         # on average at 3.3V so there is little to win to go below this. Still tunable if needed.
         # The current battery has a BMS that shuts down the battery at 20V +-1V. So that would be 2.86V +-0.14V.
-        self.battery_cell_warn_voltage = 3.9
-        self.battery_cell_min_voltage = 3.7
-        self.battery_nb_cells = 6
+        self.battery_cell_warn_voltage = 3.7
+        self.battery_cell_min_voltage = 3.5
+        self.battery_nb_cells = 10
         self.battery_check_period = 60
 
     def read_all_measurements(self) -> None:
         """Reads all the measurements for the left, right 
         """
-        self.back_wheel_measurements = self.left_wheel.get_measurements()
         self.left_wheel_measurements = self.left_wheel.get_measurements()
         self.right_wheel_measurements = self.right_wheel.get_measurements()
 
@@ -164,9 +167,9 @@ class ZuuuHAL(Node):
         try:
             float_model = float(self.zuuu_model)
             if float_model < 1.0:
-                self.omnibase = MobileBase(back_wheel_id=135, left_wheel_id=112, right_wheel_id=None)
+                self.rover_base = MobileBase(back_wheel_id=135, left_wheel_id=112, right_wheel_id=None)
             else:
-                self.omnibase = MobileBase(back_wheel_id=135, left_wheel_id=112, right_wheel_id=None)
+                self.rover_base = MobileBase(back_wheel_id=135, left_wheel_id=112, right_wheel_id=None)
         except Exception:
             msg = "ZUUU version can't be processed, check that the 'zuuu_model' tag is "\
                 "present in the .reachy.yaml file"
@@ -183,7 +186,7 @@ class ZuuuHAL(Node):
             parameters=[
                 ('laser_upper_angle', 2.85),
                 ('laser_lower_angle', -2.85),
-                ('max_duty_cyle', 0.3),
+                ('max_duty_cycle', 0.2),
                 ('cmd_vel_timeout', 0.2),
                 ('max_full_com_fails', 100),
                 ('main_tick_period', 0.012),
@@ -193,15 +196,15 @@ class ZuuuHAL(Node):
                 ('xy_tol', 0.0),
                 ('theta_tol', 0.0),
                 ('smoothing_factor', 5.0),
-                ('safety_distance', 0.3),
-                ('critical_distance', 0.25),
+                ('safety_distance', 0.7),
+                ('critical_distance', 0.55),
             ])
         self.add_on_set_parameters_callback(self.parameters_callback)
 
         # Maing sure we don't run the node if the config file is not shared
-        if self.get_parameter('max_duty_cyle').type_ is Parameter.Type.NOT_SET:
+        if self.get_parameter('max_duty_cycle').type_ is Parameter.Type.NOT_SET:
             self.get_logger().error(
-                "Parameter 'max_duty_cyle' was not initialized. Check that the param file is given to the node"
+                "Parameter 'max_duty_cycle' was not initialized. Check that the param file is given to the node"
                 "(using the launch file is the way to go). Shutting down")
             self.destroy_node()
         if self.get_parameter('smoothing_factor').type_ is Parameter.Type.NOT_SET:
@@ -215,8 +218,8 @@ class ZuuuHAL(Node):
             'laser_upper_angle').get_parameter_value().double_value  # math.pi
         self.laser_lower_angle = self.get_parameter(
             'laser_lower_angle').get_parameter_value().double_value  # -math.pi
-        self.max_duty_cyle = self.get_parameter(
-            'max_duty_cyle').get_parameter_value().double_value  # 0.3  # max is 1
+        self.max_duty_cycle = self.get_parameter(
+            'max_duty_cycle').get_parameter_value().double_value  # 0.3  # max is 1
         self.cmd_vel_timeout = self.get_parameter(
             'cmd_vel_timeout').get_parameter_value().double_value  # 0.2
         self.max_full_com_fails = self.get_parameter(
@@ -270,7 +273,7 @@ class ZuuuHAL(Node):
         self.y_goal = 0.0
         self.theta_goal = 0.0
         self.reset_odom = False
-        self.battery_voltage = 25.0
+        self.battery_voltage = 37.0
         self.mode = ZuuuModes.CMD_VEL
         self.speed_service_deadline = 0
         self.speed_service_on = False
@@ -282,8 +285,15 @@ class ZuuuHAL(Node):
         GPIO.setwarnings(False)
         GPIO.setup(FRONT_RIGHT_LIGHT, GPIO.OUT)
         GPIO.setup(FRONT_LEFT_LIGHT, GPIO.OUT)
+        GPIO.setup(REAR_RIGHT_LIGHT, GPIO.OUT)
+        GPIO.setup(REAR_LEFT_LIGHT, GPIO.OUT)
+
         GPIO.output(FRONT_RIGHT_LIGHT, GPIO.LOW)
         GPIO.output(FRONT_LEFT_LIGHT, GPIO.LOW)
+
+        GPIO.output(REAR_RIGHT_LIGHT, GPIO.LOW)
+        GPIO.output(REAR_LEFT_LIGHT, GPIO.LOW)
+
 
 
         self.scan_is_read = False
@@ -299,9 +309,9 @@ class ZuuuHAL(Node):
         self.theta_pid = PID(p=2.0, i=0.0, d=0.0,
                              max_command=1.0, max_i_contribution=0.0)
 
-        self.max_wheel_speed = self.pwm_to_wheel_rot_speed(self.max_duty_cyle)
+        self.max_wheel_speed = self.pwm_to_wheel_rot_speed(self.max_duty_cycle)
         self.get_logger().info(
-            f"The maximum PWM value is {self.max_duty_cyle*100}% => maximum wheel speed is set to "
+            f"The maximum PWM value is {self.max_duty_cycle*100}% => maximum wheel speed is set to "
             f"{self.max_wheel_speed:.2f}rad/s")
 
         self.cmd_vel_sub = self.create_subscription(
@@ -379,7 +389,7 @@ class ZuuuHAL(Node):
         self.measurements_t = time.time()
         # Checking battery once at the start, then periodically
         self.check_battery()
-        self.create_timer(self.omnibase.battery_check_period,
+        self.create_timer(self.rover_base.battery_check_period,
                           self.check_battery)
 
     def parameters_callback(self, params) -> None:
@@ -395,9 +405,9 @@ class ZuuuHAL(Node):
                 elif param.name == "laser_lower_angle":
                     self.laser_lower_angle = param.value
                     success = True
-                elif param.name == "max_duty_cyle":
+                elif param.name == "max_duty_cycle":
                     if param.value >= 0.0 and param.value <= 1.0:
-                        self.max_duty_cyle = param.value
+                        self.max_duty_cycle = param.value
                         success = True
                 elif param.name == "cmd_vel_timeout":
                     if param.value >= 0.0:
@@ -588,13 +598,15 @@ class ZuuuHAL(Node):
         t = time.time()
         if verbose:
             self.print_all_measurements()
-        if (t - self.measurements_t) > (self.omnibase.battery_check_period+1):
+        """
+        if (t - self.measurements_t) > (self.rover_base.battery_check_period+1):
             self.get_logger().warning("Zuuu's measurements are not made often enough. Reading now.")
             self.read_measurements()
-        warn_voltage = self.omnibase.battery_nb_cells * \
-            self.omnibase.battery_cell_warn_voltage
-        min_voltage = self.omnibase.battery_nb_cells * \
-            self.omnibase.battery_cell_min_voltage
+        """
+        warn_voltage = self.rover_base.battery_nb_cells * \
+            self.rover_base.battery_cell_warn_voltage
+        min_voltage = self.rover_base.battery_nb_cells * \
+            self.rover_base.battery_cell_min_voltage
         voltage = self.battery_voltage
 
         if (min_voltage < voltage < warn_voltage):
@@ -612,9 +624,9 @@ class ZuuuHAL(Node):
     def emergency_shutdown(self) -> None:
         """Sets a PWM of 0V to the three wheel motors, equivalent to a brake.
         """
-        self.omnibase.back_wheel.set_duty_cycle(0)
-        self.omnibase.left_wheel.set_duty_cycle(0)
-        self.omnibase.right_wheel.set_duty_cycle(0)
+        self.rover_base.back_wheel.set_duty_cycle(0)
+        self.rover_base.left_wheel.set_duty_cycle(0)
+        self.rover_base.right_wheel.set_duty_cycle(0)
         self.get_logger().warn("Emergency shutdown!")
         time.sleep(0.1)
 
@@ -731,24 +743,18 @@ class ZuuuHAL(Node):
 
 
     def ik_vel(self, x_vel: float, y_vel: float, rot_vel: float) -> List[float]:
-        """Takes 2 linear speeds and 1 rot speed (robot's egocentric frame) and outputs the rotational speed (rad/s)
-        of each of the 3 motors in an omni setup
+        """Takes 2 linear speeds and 1 rot speed (robot's egocentric frame) and outputs the rotational speed (rad/s) of each of the 3 motors in an omni setup
 
         Args:
             x (float): x speed (m/s). Positive "in front" of the robot.
             y (float): y speed (m/s). Positive "to the left" of the robot.
             rot (float): rotational speed (rad/s). Positive counter-clock wise.
         """
-        wheel_rot_speed_back = (1/self.omnibase.wheel_radius) * (self.omnibase.wheel_to_center*rot_vel - y_vel)
-        wheel_rot_speed_right = (1/self.omnibase.wheel_radius) * (
-             self.omnibase.wheel_to_center*rot_vel + y_vel/2.0 + math.sin(math.pi/3)*x_vel)
-        wheel_rot_speed_left = (1/self.omnibase.wheel_radius) * (self.omnibase.wheel_to_center *
-                                                                 rot_vel + math.sin(math.pi/3)*y_vel/2 -
-                                                                 math.sin(math.pi/3)*x_vel)
+        wheel_rot_speed_back = 0
+        wheel_rot_speed_right = (x_vel + rot_vel * self.rover_base.y_distance_wheels/2) / self.rover_base.wheel_radius
+        wheel_rot_speed_left = (x_vel - rot_vel * self.rover_base.y_distance_wheels/2) / self.rover_base.wheel_radius
 
         return [wheel_rot_speed_back, wheel_rot_speed_right, wheel_rot_speed_left]
-
-
 
 
     def dk_vel(self, rot_l: float, rot_r: float, rot_b: float) -> float:
@@ -761,15 +767,15 @@ class ZuuuHAL(Node):
             rot_b (float): rpm speed of the back wheel
         """
         # rpm to rad/s then m/s
-        speed_l = (2*math.pi*rot_l/60)*self.omnibase.wheel_radius
-        speed_r = (2*math.pi*rot_r/60)*self.omnibase.wheel_radius
-        speed_b = (2*math.pi*rot_b/60)*self.omnibase.wheel_radius
+        speed_l = (2*math.pi*rot_l/60)*self.rover_base.wheel_radius
+        speed_r = (2*math.pi*rot_r/60)*self.rover_base.wheel_radius
+        speed_b = (2*math.pi*rot_b/60)*self.rover_base.wheel_radius
 
         x_vel = -speed_l*(1/(2*math.sin(math.pi/3))) + \
             speed_r*(1/(2*math.sin(math.pi/3)))
         y_vel = -speed_b*2/3.0 + speed_l*1/3.0 + speed_r*1/3.0
         theta_vel = (speed_l + speed_r + speed_b) / \
-            (3*self.omnibase.wheel_to_center)
+            (3*self.rover_base.wheel_to_center)
 
         return [x_vel, y_vel, theta_vel]
 
@@ -825,19 +831,19 @@ class ZuuuHAL(Node):
         """
         to_print = "\n*** back_wheel measurements:\n"
         to_print += self.format_measurements(
-            self.omnibase.back_wheel_measurements)
+            self.rover_base.back_wheel_measurements)
         to_print += "\n\n*** left_wheel:\n"
         to_print += self.format_measurements(
-            self.omnibase.left_wheel_measurements)
+            self.rover_base.left_wheel_measurements)
         to_print += "\n\n*** right_wheel:\n"
         to_print += self.format_measurements(
-            self.omnibase.right_wheel_measurements)
+            self.rover_base.right_wheel_measurements)
         to_print += "\n\n Fails ('Nones') left:{}, right:{}, back:{}".format(
-            self.omnibase.left_wheel_nones, self.omnibase.right_wheel_nones, self.omnibase.back_wheel_nones)
+            self.rover_base.left_wheel_nones, self.rover_base.right_wheel_nones, self.rover_base.back_wheel_nones)
         to_print += "\n\n AVG RPM left:{:.2f}, right:{:.2f}, back:{:.2f}".format(
-            self.omnibase.left_wheel_avg_rpm/self.omnibase.half_poles,
-            self.omnibase.right_wheel_avg_rpm/self.omnibase.half_poles,
-            self.omnibase.back_wheel_avg_rpm/self.omnibase.half_poles)
+            self.rover_base.left_wheel_avg_rpm/self.rover_base.half_poles,
+            self.rover_base.right_wheel_avg_rpm/self.rover_base.half_poles,
+            self.rover_base.back_wheel_avg_rpm/self.rover_base.half_poles)
 
         self.get_logger().info("{}".format(to_print))
         # 20 tours en 35s, avg_rpm ~=34
@@ -846,19 +852,19 @@ class ZuuuHAL(Node):
         """Publishes the most recent measure of rotational speed for each of the 3 wheels on 3 separate topics.
         """
         # If the measurements are None, not publishing
-        #if self.omnibase.back_wheel_measurements is not None:
+        #if self.rover_base.back_wheel_measurements is not None:
         #    rpm_back = Float32()
-        #    rpm_back.data = float(self.omnibase.back_wheel_measurements.rpm)
+        #    rpm_back.data = float(self.rover_base.back_wheel_measurements.rpm)
         #    self.pub_back_wheel_rpm.publish(rpm_back)
 
-        if self.omnibase.left_wheel_measurements is not None:
+        if self.rover_base.left_wheel_measurements is not None:
             rpm_left = Float32()
-            rpm_left.data = float(self.omnibase.left_wheel_measurements.rpm)
+            rpm_left.data = float(self.rover_base.left_wheel_measurements.rpm)
             self.pub_left_wheel_rpm.publish(rpm_left)
 
-        if self.omnibase.right_wheel_measurements is not None:
+        if self.rover_base.right_wheel_measurements is not None:
             rpm_right = Float32()
-            rpm_right.data = float(self.omnibase.right_wheel_measurements.rpm)
+            rpm_right.data = float(self.rover_base.right_wheel_measurements.rpm)
             self.pub_right_wheel_rpm.publish(rpm_right)
 
     def update_wheel_speeds(self) -> None:
@@ -867,39 +873,39 @@ class ZuuuHAL(Node):
         """
         # Keeping a local value of the wheel speeds to handle None measurements (we'll use the last valid measure)
 
-        self.omnibase.back_wheel_nones = 0
-        self.omnibase.left_wheel_nones = 0
-        self.omnibase.back_wheel_nones = 0
+        self.rover_base.back_wheel_nones = 0
+        self.rover_base.left_wheel_nones = 0
+        self.rover_base.back_wheel_nones = 0
 
-        #if self.omnibase.back_wheel_measurements is not None:
+        #if self.rover_base.back_wheel_measurements is not None:
         #    value = float(
-        #       self.omnibase.back_wheel_measurements.rpm)
-        #  self.omnibase.back_wheel_rpm = value
-        #  self.omnibase.back_wheel_rpm_deque.appendleft(value)
-        #   self.omnibase.back_wheel_avg_rpm = self.omnibase.deque_to_avg(
-        #       self.omnibase.back_wheel_rpm_deque)
+        #       self.rover_base.back_wheel_measurements.rpm)
+        #  self.rover_base.back_wheel_rpm = value
+        #  self.rover_base.back_wheel_rpm_deque.appendleft(value)
+        #   self.rover_base.back_wheel_avg_rpm = self.rover_base.deque_to_avg(
+        #       self.rover_base.back_wheel_rpm_deque)
         # else:
-        #    self.omnibase.back_wheel_nones += 1
+        #    self.rover_base.back_wheel_nones += 1
 
-        if self.omnibase.left_wheel_measurements is not None:
+        if self.rover_base.left_wheel_measurements is not None:
             value = float(
-                self.omnibase.left_wheel_measurements.rpm)
-            self.omnibase.left_wheel_rpm = value
-            self.omnibase.left_wheel_rpm_deque.appendleft(value)
-            self.omnibase.left_wheel_avg_rpm = self.omnibase.deque_to_avg(
-                self.omnibase.left_wheel_rpm_deque)
+                self.rover_base.left_wheel_measurements.rpm)
+            self.rover_base.left_wheel_rpm = value
+            self.rover_base.left_wheel_rpm_deque.appendleft(value)
+            self.rover_base.left_wheel_avg_rpm = self.rover_base.deque_to_avg(
+                self.rover_base.left_wheel_rpm_deque)
         else:
-            self.omnibase.left_wheel_nones += 1
+            self.rover_base.left_wheel_nones += 1
 
-        if self.omnibase.right_wheel_measurements is not None:
+        if self.rover_base.right_wheel_measurements is not None:
             value = float(
-                self.omnibase.right_wheel_measurements.rpm)
-            self.omnibase.right_wheel_rpm = value
-            self.omnibase.right_wheel_rpm_deque.appendleft(value)
-            self.omnibase.right_wheel_avg_rpm = self.omnibase.deque_to_avg(
-                self.omnibase.right_wheel_rpm_deque)
+                self.rover_base.right_wheel_measurements.rpm)
+            self.rover_base.right_wheel_rpm = value
+            self.rover_base.right_wheel_rpm_deque.appendleft(value)
+            self.rover_base.right_wheel_avg_rpm = self.rover_base.deque_to_avg(
+                self.rover_base.right_wheel_rpm_deque)
         else:
-            self.omnibase.right_wheel_nones += 1
+            self.rover_base.right_wheel_nones += 1
 
     def publish_odometry_and_tf(self) -> None:
         """Publishes the current odometry position (Odometry type published on the /odom topic) and also
@@ -960,9 +966,9 @@ class ZuuuHAL(Node):
 
         # Local speeds in egocentric frame.
         # "rpm" are actually erpm and need to be divided by half the amount of magnetic poles to get the actual rpm.
-        self.x_vel, self.y_vel, self.theta_vel = self.dk_vel(self.omnibase.left_wheel_rpm/self.omnibase.half_poles,
-                                                             self.omnibase.right_wheel_rpm/self.omnibase.half_poles,
-                                                             self.omnibase.back_wheel_rpm/self.omnibase.half_poles)
+        self.x_vel, self.y_vel, self.theta_vel = self.dk_vel(self.rover_base.left_wheel_rpm/self.rover_base.half_poles,
+                                                             self.rover_base.right_wheel_rpm/self.rover_base.half_poles,
+                                                             self.rover_base.back_wheel_rpm/self.rover_base.half_poles)
         # self.get_logger().info(
         #     "IK vel : {:.2f}, {:.2f}, {:.2f}".format(self.x_vel, self.y_vel, self.theta_vel))
         # Applying the small displacement in the world-fixed odom frame (simple 2D rotation)
@@ -994,13 +1000,13 @@ class ZuuuHAL(Node):
         self.publish_odometry_and_tf()
 
     def limit_duty_cycles(self, duty_cycles: List[float]) -> List[float]:
-        """Limits the duty cycles to stay in +-max_duty_cyle
+        """Limits the duty cycles to stay in +-max_duty_cycle
         """
         for i in range(len(duty_cycles)):
             if duty_cycles[i] < 0:
-                duty_cycles[i] = max(-self.max_duty_cyle, duty_cycles[i])
+                duty_cycles[i] = max(-self.max_duty_cycle, duty_cycles[i])
             else:
-                duty_cycles[i] = min(self.max_duty_cyle, duty_cycles[i])
+                duty_cycles[i] = min(self.max_duty_cycle, duty_cycles[i])
         return duty_cycles
 
     def limit_wheel_speeds(self, wheel_speeds: List[float]) -> List[float]:
@@ -1019,13 +1025,13 @@ class ZuuuHAL(Node):
         """
         self.nb_full_com_fails = 0
         self.max_full_com_fails = 100
-        self.omnibase.read_all_measurements()
-        #if self.omnibase.back_wheel_measurements is not None:
-        #   self.battery_voltage = self.omnibase.back_wheel_measurements.v_in
-        if self.omnibase.left_wheel_measurements is not None:
-            self.battery_voltage = self.omnibase.left_wheel_measurements.v_in
-        elif self.omnibase.right_wheel_measurements is not None:
-            self.battery_voltage = self.omnibase.right_wheel_measurements.v_in
+        self.rover_base.read_all_measurements()
+        #if self.rover_base.back_wheel_measurements is not None:
+        #   self.battery_voltage = self.rover_base.back_wheel_measurements.v_in
+        if self.rover_base.left_wheel_measurements is not None:
+            self.battery_voltage = self.rover_base.left_wheel_measurements.v_in
+        elif self.rover_base.right_wheel_measurements is not None:
+            self.battery_voltage = self.rover_base.right_wheel_measurements.v_in
         else:
             # Decidemment ! Keeping last valid measure...
             self.nb_full_com_fails += 1
@@ -1047,21 +1053,21 @@ class ZuuuHAL(Node):
             duty_cycles = [self.wheel_rot_speed_to_pwm(
                 wheel_speed) for wheel_speed in wheel_speeds]
             duty_cycles = self.limit_duty_cycles(duty_cycles)
-            self.omnibase.back_wheel.set_duty_cycle(
+            self.rover_base.back_wheel.set_duty_cycle(
                 duty_cycles[0])
-            self.omnibase.left_wheel.set_duty_cycle(
+            self.rover_base.left_wheel.set_duty_cycle(
                 duty_cycles[2])
-            self.omnibase.right_wheel.set_duty_cycle(
+            self.rover_base.right_wheel.set_duty_cycle(
                 duty_cycles[1])
         elif self.control_mode is ZuuuControlModes.PID:
             # rad/s to rpm to erpm
             wheel_speeds = self.limit_wheel_speeds(wheel_speeds)
-            self.omnibase.back_wheel.set_rpm(
-                int(self.omnibase.half_poles*wheel_speeds[0]*30/math.pi))
-            self.omnibase.left_wheel.set_rpm(
-                int(self.omnibase.half_poles*wheel_speeds[2]*30/math.pi))
-            self.omnibase.right_wheel.set_rpm(
-                int(self.omnibase.half_poles*wheel_speeds[1]*30/math.pi))
+            self.rover_base.back_wheel.set_rpm(
+                int(self.rover_base.half_poles*wheel_speeds[0]*30/math.pi))
+            self.rover_base.left_wheel.set_rpm(
+                int(self.rover_base.half_poles*wheel_speeds[2]*30/math.pi))
+            self.rover_base.right_wheel.set_rpm(
+                int(self.rover_base.half_poles*wheel_speeds[1]*30/math.pi))
         else:
             self.get_logger().warning("unknown control mode '{}'".format(self.control_mode))
 
@@ -1091,6 +1097,7 @@ class ZuuuHAL(Node):
     def main_tick(self, verbose: bool = False):
         """Main function of the HAL node. This function is made to be called often. Handles the main state machine"""
         t = time.time()
+        """
         if (not self.scan_is_read) or ((t - self.scan_t0) > self.scan_timeout):
             # If too much time without a LIDAR scan, the speeds are set to 0 for safety.
             self.get_logger().warning(
@@ -1099,6 +1106,7 @@ class ZuuuHAL(Node):
             self.send_wheel_commands(wheel_speeds)
             time.sleep(0.5)
             return
+        """
         if self.first_tick:
             self.first_tick = False
             self.get_logger().info("=> Zuuu HAL up and running! **")
@@ -1119,13 +1127,13 @@ class ZuuuHAL(Node):
                 self.x_vel_goal_filtered, self.y_vel_goal_filtered, self.theta_vel_goal_filtered)
             self.send_wheel_commands(wheel_speeds)
         elif self.mode is ZuuuModes.BRAKE:
-            self.omnibase.back_wheel.set_duty_cycle(0)
-            self.omnibase.left_wheel.set_duty_cycle(0)
-            self.omnibase.right_wheel.set_duty_cycle(0)
+            self.rover_base.back_wheel.set_duty_cycle(0)
+            self.rover_base.left_wheel.set_duty_cycle(0)
+            self.rover_base.right_wheel.set_duty_cycle(0)
         elif self.mode is ZuuuModes.FREE_WHEEL:
-            self.omnibase.back_wheel.set_current(0)
-            self.omnibase.left_wheel.set_current(0)
-            self.omnibase.right_wheel.set_current(0)
+            self.rover_base.back_wheel.set_current(0)
+            self.rover_base.left_wheel.set_current(0)
+            self.rover_base.right_wheel.set_current(0)
         elif self.mode is ZuuuModes.SPEED:
             if self.speed_service_deadline < time.time():
                 if self.speed_service_on:

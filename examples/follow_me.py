@@ -38,8 +38,8 @@ class FollowMe(Node):
         self.cmd_pub = self.create_publisher(
             Twist, 'cmd_vel', 10)
 
-        self.lin_max_speed = 0.5
-        self.rot_max_speed = 1.2
+        self.lin_max_speed = 0.15
+        self.rot_max_speed = 0.6
         self.t0 = time.time()
         self.get_logger().info(
             "Follow me started.")
