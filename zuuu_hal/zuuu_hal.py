@@ -747,7 +747,7 @@ class ZuuuHAL(Node):
 
         Args:
             x (float): x speed (m/s). Positive "in front" of the robot.
-            y (float): y speed (m/s). Positive "to the left" of the robot.
+            y (float): y speed (m.rover_base/s). Positive "to the left" of the robot.
             rot (float): rotational speed (rad/s). Positive counter-clock wise.
         """
         wheel_rot_speed_back = 0
@@ -757,25 +757,21 @@ class ZuuuHAL(Node):
         return [wheel_rot_speed_back, wheel_rot_speed_right, wheel_rot_speed_left]
 
 
-    def dk_vel(self, rot_l: float, rot_r: float, rot_b: float) -> float:
+    def dk_vel(self, rot_l: float, rot_r: float) -> float:
         """Takes the 3 rotational speeds (in rpm) of the 3 wheels and outputs the x linear speed (m/s),
         y linear speed (m/s) and rotational speed (rad/s) in the robot egocentric frame
 
         Args:
             rot_l (float): rpm speed of the left wheel
             rot_r (float): rpm speed of the right wheel
-            rot_b (float): rpm speed of the back wheel
         """
         # rpm to rad/s then m/s
         speed_l = (2*math.pi*rot_l/60)*self.rover_base.wheel_radius
         speed_r = (2*math.pi*rot_r/60)*self.rover_base.wheel_radius
-        speed_b = (2*math.pi*rot_b/60)*self.rover_base.wheel_radius
-
-        x_vel = -speed_l*(1/(2*math.sin(math.pi/3))) + \
-            speed_r*(1/(2*math.sin(math.pi/3)))
-        y_vel = -speed_b*2/3.0 + speed_l*1/3.0 + speed_r*1/3.0
-        theta_vel = (speed_l + speed_r + speed_b) / \
-            (3*self.rover_base.wheel_to_center)
+        
+        x_vel = (self.rover_base.wheel_radius * (speed_r + speed_l)) / 2
+        y_vel = 0.0
+        theta_vel = (self.rover_base.wheel_radius * (speed_r - speed_l)) / self.rover_base.y_distance_wheels
 
         return [x_vel, y_vel, theta_vel]
 
@@ -967,8 +963,7 @@ class ZuuuHAL(Node):
         # Local speeds in egocentric frame.
         # "rpm" are actually erpm and need to be divided by half the amount of magnetic poles to get the actual rpm.
         self.x_vel, self.y_vel, self.theta_vel = self.dk_vel(self.rover_base.left_wheel_rpm/self.rover_base.half_poles,
-                                                             self.rover_base.right_wheel_rpm/self.rover_base.half_poles,
-                                                             self.rover_base.back_wheel_rpm/self.rover_base.half_poles)
+                                                             self.rover_base.right_wheel_rpm/self.rover_base.half_poles)
         # self.get_logger().info(
         #     "IK vel : {:.2f}, {:.2f}, {:.2f}".format(self.x_vel, self.y_vel, self.theta_vel))
         # Applying the small displacement in the world-fixed odom frame (simple 2D rotation)
